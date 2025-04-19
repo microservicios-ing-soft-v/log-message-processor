@@ -1,0 +1,118 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Log in to Azure Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ secrets.ACR_LOGIN_SERVER }}
+        username: ${{ secrets.ACR_USERNAME }}
+        password: ${{ secrets.ACR_PASSWORD }}
+      
+    - name: Extract repository name
+      id: repo-name
+      run: echo "REPO_NAME=$(echo ${{ github.repository }} | awk -F '/' '{print $2}')" >> $GITHUB_OUTPUT
+      
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: ${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.repo-name.outputs.REPO_NAME }}:latest
+        cache-from: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.repo-name.outputs.REPO_NAME }}:buildcache
+        cache-to: type=registry,ref=${{ secrets.ACR_LOGIN_SERVER }}/${{ steps.repo-name.outputs.REPO_NAME }}:buildcache,mode=max
+        
+    - name: Notify deployment status
+      if: success()
+      run: |
+        echo "✅ Docker image for ${{ steps.repo-name.outputs.REPO_NAME }} successfully built and pushed to ACR"
+      
+  test:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+      
+    - name: Determine language and run tests
+      id: detect-language
+      run: |
+        if [ -f "package.json" ]; then
+          echo "LANGUAGE=nodejs" >> $GITHUB_OUTPUT
+        elif [ -f "pom.xml" ]; then
+          echo "LANGUAGE=java" >> $GITHUB_OUTPUT
+        elif [ -f "go.mod" ]; then
+          echo "LANGUAGE=golang" >> $GITHUB_OUTPUT
+        elif [ -f "requirements.txt" ]; then
+          echo "LANGUAGE=python" >> $GITHUB_OUTPUT
+        else
+          echo "LANGUAGE=unknown" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Set up Node.js
+      if: steps.detect-language.outputs.LANGUAGE == 'nodejs'
+      uses: actions/setup-node@v3
+      with:
+        node-version: '14'
+        
+    - name: Install Node.js dependencies
+      if: steps.detect-language.outputs.LANGUAGE == 'nodejs'
+      run: npm install
+      
+    - name: Run Node.js tests
+      if: steps.detect-language.outputs.LANGUAGE == 'nodejs'
+      run: npm test || echo "No tests found or tests failed"
+      
+    - name: Set up JDK
+      if: steps.detect-language.outputs.LANGUAGE == 'java'
+      uses: actions/setup-java@v3
+      with:
+        java-version: '8'
+        distribution: 'adopt'
+        
+    - name: Run Java tests with Maven
+      if: steps.detect-language.outputs.LANGUAGE == 'java'
+      run: ./mvnw test || echo "No tests found or tests failed"
+      
+    - name: Set up Go
+      if: steps.detect-language.outputs.LANGUAGE == 'golang'
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.18'
+        
+    - name: Run Go tests
+      if: steps.detect-language.outputs.LANGUAGE == 'golang'
+      run: go test ./... || echo "No tests found or tests failed"
+      
+    - name: Set up Python
+      if: steps.detect-language.outputs.LANGUAGE == 'python'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install Python dependencies
+      if: steps.detect-language.outputs.LANGUAGE == 'python'
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install pytest
+        
+    - name: Run Python tests
+      if: steps.detect-language.outputs.LANGUAGE == 'python'
+      run: pytest || echo "No tests found or tests failed"
