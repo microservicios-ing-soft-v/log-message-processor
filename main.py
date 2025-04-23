@@ -6,17 +6,39 @@ import requests
 from py_zipkin.zipkin import zipkin_span, ZipkinAttrs, generate_random_64bit_string
 import time
 import random
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+redis_client = None
 
 def log_message(message):
     time_delay = random.randrange(0, 2000)
     time.sleep(time_delay / 1000)
     print('message received after waiting for {}ms: {}'.format(time_delay, message))
 
-if __name__ == '__main__':
+@app.route('/health')
+def health_check():
+    global redis_client
+    if redis_client:
+        try:
+            redis_client.ping()
+            return jsonify({"status": "UP"}), 200
+        except Exception as e:
+            return jsonify({"status": "DOWN", "details": f"Redis not connected: {e}"}), 503
+    else:
+        return jsonify({"status": "DOWN", "details": "Redis client not initialized"}), 503
+
+def redis_consumer():
+    global redis_client
     redis_host = os.environ['REDIS_HOST']
     redis_port = int(os.environ['REDIS_PORT'])
     redis_channel = os.environ['REDIS_CHANNEL']
     zipkin_url = os.environ['ZIPKIN_URL'] if 'ZIPKIN_URL' in os.environ else ''
+
+    redis_client = redis.Redis(host=redis_host, port=redis_port, db=0)
+    pubsub = redis_client.pubsub()
+    pubsub.subscribe([redis_channel])
+
     def http_transport(encoded_span):
         requests.post(
             zipkin_url,
@@ -24,8 +46,6 @@ if __name__ == '__main__':
             headers={'Content-Type': 'application/x-thrift'},
         )
 
-    pubsub = redis.Redis(host=redis_host, port=redis_port, db=0).pubsub()
-    pubsub.subscribe([redis_channel])
     for item in pubsub.listen():
         try:
             message = json.loads(str(item['data'].decode("utf-8")))
@@ -57,6 +77,12 @@ if __name__ == '__main__':
             print('did not send data to Zipkin: {}'.format(e))
             log_message(message)
 
+if __name__ == '__main__':
+    import threading
+    # Iniciar el consumidor de Redis en un hilo separado
+    redis_thread = threading.Thread(target=redis_consumer)
+    redis_thread.daemon = True
+    redis_thread.start()
 
-
-
+    # Iniciar el servidor web Flask en el hilo principal
+    app.run(host='0.0.0.0', port=5000) # Puedes cambiar el puerto si es necesario
