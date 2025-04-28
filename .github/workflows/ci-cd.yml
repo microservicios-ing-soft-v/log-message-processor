@@ -14,7 +14,7 @@ env:
   ACR_NAME: ${{ secrets.ACR_NAME }}
   KEY_VAULT_NAME: ${{ secrets.KEY_VAULT_NAME }}
   RESOURCE_GROUP_NAME: ${{ secrets.RESOURCE_GROUP_NAME }}
-  CONTAINERAPPS_ENVIRONMENT: ${{ secrets.CONTAINERAPPS_ENVIRONMENT }} # 👈 Agregado
+  CONTAINERAPPS_ENVIRONMENT: ${{ secrets.CONTAINERAPPS_ENVIRONMENT }}
   SERVICE_NAME: 'log-message-processor'
 
 jobs:
@@ -56,15 +56,38 @@ jobs:
           tags: ${{ env.ACR_LOGIN_SERVER }}/${{ env.SERVICE_NAME }}:${{ github.sha }},${{ env.ACR_LOGIN_SERVER }}/${{ env.SERVICE_NAME }}:latest
           context: .
 
+      - name: Get Redis URL
+        id: get_redis_url
+        run: |
+          REDIS_FQDN=$(az containerapp show --name redis --resource-group ${{ env.RESOURCE_GROUP_NAME }} --query properties.configuration.ingress.fqdn -o tsv || echo "")
+          if [ -z "$REDIS_FQDN" ]; then
+            echo "Redis FQDN not found. Using default Container Apps URL pattern."
+            REDIS_FQDN="redis.${CONTAINERAPPS_ENVIRONMENT_DEFAULT_DOMAIN}"
+          fi
+          echo "REDIS_URL=http://$REDIS_FQDN:6379" >> $GITHUB_ENV
+
+      - name: Get Zipkin URL
+        id: get_zipkin_url
+        run: |
+          ZIPKIN_FQDN=$(az containerapp show --name zipkin --resource-group ${{ env.RESOURCE_GROUP_NAME }} --query properties.configuration.ingress.fqdn -o tsv || echo "")
+          if [ -z "$ZIPKIN_FQDN" ]; then
+            echo "Zipkin FQDN not found. Using default Container Apps URL pattern."
+            ZIPKIN_FQDN="zipkin.${CONTAINERAPPS_ENVIRONMENT_DEFAULT_DOMAIN}"
+          fi
+          echo "ZIPKIN_URL=http://$ZIPKIN_FQDN/api/v2/spans" >> $GITHUB_ENV
+
       - name: Create or Update Container App
         run: |
-          # Comprobar si el Container App existe
           if az containerapp show --name ${{ env.SERVICE_NAME }} --resource-group ${{ env.RESOURCE_GROUP_NAME }} &>/dev/null; then
             echo "Container App ${{ env.SERVICE_NAME }} exists, updating..."
             az containerapp update \
               --name ${{ env.SERVICE_NAME }} \
               --resource-group ${{ env.RESOURCE_GROUP_NAME }} \
-              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.SERVICE_NAME }}:${{ github.sha }}
+              --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+              --set-env-vars \
+                  REDIS_HOST=${{ env.REDIS_URL }} \
+                  REDIS_CHANNEL=log_channel \
+                  ZIPKIN_URL=${{ env.ZIPKIN_URL }}
           else
             echo "Container App ${{ env.SERVICE_NAME }} does not exist, creating..."
             az containerapp create \
@@ -74,7 +97,13 @@ jobs:
               --image ${{ env.ACR_LOGIN_SERVER }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
               --registry-server ${{ env.ACR_LOGIN_SERVER }} \
               --registry-username ${{ env.AZURE_CLIENT_ID }} \
-              --registry-password ${{ env.AZURE_CLIENT_SECRET }}
+              --registry-password ${{ env.AZURE_CLIENT_SECRET }} \
+              --env-vars \
+                  REDIS_HOST=${{ env.REDIS_URL }} \
+                  REDIS_CHANNEL=log_channel \
+                  ZIPKIN_URL=${{ env.ZIPKIN_URL }} \
+              --ingress internal \
+              --target-port 8091
           fi
 
       - name: Azure Logout
